@@ -53,6 +53,16 @@ const UI_ONLY_QUERY_PARAMS = new Set([
 
 const FEEDBACK_TO_API = { 1: "good", 2: "bad", good: "good", bad: "bad" };
 
+// Windows longer than a day chart per day so the backend can serve them from the daily rollup.
+function isMultiDayWindow({ range, start, end }) {
+  if (start || end) {
+    const from = start ? new Date(start).getTime() : NaN;
+    const to = end ? new Date(end).getTime() : Date.now();
+    return Number.isNaN(from) || to - from > 24 * 3600 * 1000;
+  }
+  return (range || "30d") !== "24h";
+}
+
 function buildAnalyticsQueryParams(
   rawParams,
   { selectedVersion, filterByFields = {}, filterVariableRows = [{ key: "", value: "" }], extra = {} } = {}
@@ -93,6 +103,9 @@ function buildAnalyticsQueryParams(
   if (!queryParams.knowledgebase_id) delete queryParams.knowledgebase_id;
   if (!queryParams.agent_id) delete queryParams.agent_id;
   if (!queryParams.interval) queryParams.interval = "1h";
+  if (isMultiDayWindow({ range: queryParams.range, start: queryParams.start_date, end: queryParams.end_date })) {
+    queryParams.interval = "24h";
+  }
 
   const activeFilterBy = {};
   if (filterByFields.thread_id?.trim()) activeFilterBy.thread_id = filterByFields.thread_id.trim();
@@ -242,6 +255,12 @@ function Page({ params, searchParams }) {
   const [filterEnd, setFilterEnd] = useState(resolvedSearchParams?.end || "");
   const [filterRange, setFilterRange] = useState(getNormalizedRange(resolvedSearchParams?.range));
   const [filterInterval, setFilterInterval] = useState(resolvedSearchParams?.interval || "1h");
+  // Follows the applied (URL) window, not the unsaved custom-date inputs.
+  const isMultiDay = isMultiDayWindow({
+    range: getNormalizedRange(resolvedSearchParams?.range),
+    start: resolvedSearchParams?.start,
+    end: resolvedSearchParams?.end,
+  });
   const [filterFeedback, setFilterFeedback] = useState(resolvedSearchParams?.feedback || "all");
   const [filterError, setFilterError] = useState(resolvedSearchParams?.error === "true");
   const [filterReviewFailed, setFilterReviewFailed] = useState(resolvedSearchParams?.review_failed === "true");
@@ -363,11 +382,14 @@ function Page({ params, searchParams }) {
     failed: item.failed,
   }));
 
+  // Latency is stored in seconds (over_all_time). A missing slow/worst stays null
+  // so that series leaves a gap instead of dropping to 0.
+  const toSeconds = (value) => (value == null ? null : Number(Number(value).toFixed(2)));
   const latencyData = responseTime.map((item) => ({
     time: formatDate(item.t),
-    typical: Number(((item.typical || 0) / 1000).toFixed(2)),
-    slow: Number(((item.slow || 0) / 1000).toFixed(2)),
-    worst: Number(((item.worst || 0) / 1000).toFixed(2)),
+    typical: toSeconds(item.typical) ?? 0,
+    slow: toSeconds(item.slow),
+    worst: toSeconds(item.worst),
   }));
 
   const costData = costOverTime.map((item) => ({
@@ -392,9 +414,9 @@ function Page({ params, searchParams }) {
         color: "#ef4444",
         data: requestsOverTime.map((d) => ({ v: d.failed || 0 })),
       },
-      "Avg Successful Response": {
+      "Avg Response": {
         color: "#f59e0b",
-        data: responseTime.map((d) => ({ v: Number(((d.typical || 0) / 1000).toFixed(2)) })),
+        data: responseTime.map((d) => ({ v: Number(Number(d.typical || 0).toFixed(2)) })),
       },
       "Est. Cost": {
         color: "#ef4444",
@@ -1051,23 +1073,32 @@ function Page({ params, searchParams }) {
                       { label: "6h", value: "6h" },
                       { label: "12h", value: "12h" },
                       { label: "24h", value: "24h" },
-                    ].map((item) => (
-                      <button
-                        key={item.value}
-                        onClick={() => {
-                          const newInterval = filterInterval === item.value ? "" : item.value;
-                          setFilterInterval(newInterval);
-                          applyFilters({ interval: newInterval });
-                        }}
-                        className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                          filterInterval === item.value
-                            ? "bg-indigo-600 text-white"
-                            : "bg-base-200 text-base-content/70 hover:bg-base-300"
-                        }`}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
+                    ].map((item) => {
+                      const isLocked = isMultiDay && item.value !== "24h";
+                      const isActive = (isMultiDay ? "24h" : filterInterval) === item.value;
+                      return (
+                        <button
+                          key={item.value}
+                          disabled={isLocked}
+                          title={isLocked ? "Ranges longer than a day are shown per day" : undefined}
+                          onClick={() => {
+                            if (isMultiDay) return;
+                            const newInterval = filterInterval === item.value ? "" : item.value;
+                            setFilterInterval(newInterval);
+                            applyFilters({ interval: newInterval });
+                          }}
+                          className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                            isActive
+                              ? "bg-indigo-600 text-white"
+                              : isLocked
+                                ? "bg-base-200 text-base-content/30 cursor-not-allowed"
+                                : "bg-base-200 text-base-content/70 hover:bg-base-300"
+                          }`}
+                        >
+                          {item.label}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
